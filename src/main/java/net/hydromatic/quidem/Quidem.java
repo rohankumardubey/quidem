@@ -324,9 +324,8 @@ public class Quidem {
           resultSetException = null;
           resultSet = statement.executeQuery(sqlCommand.sql);
           if (resultSet != null) {
-            final OutputFormat format =
-                    (OutputFormat)
-                            env.apply(Property.OUTPUTFORMAT.propertyName());
+            final OutputFormat format = (OutputFormat) env
+                    .apply(Property.OUTPUTFORMAT.propertyName());
             format.format(resultSet, headerLines, bodyLines, footerLines,
                     sqlCommand.sort);
           }
