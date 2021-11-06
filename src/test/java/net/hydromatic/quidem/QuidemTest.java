@@ -28,12 +28,17 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.equalTo;
@@ -218,6 +223,22 @@ public class QuidemTest {
                 + "\tat org.hsqldb.jdbc.JDBCUtil.sqlException\\(Unknown Source\\)\n"
                 + ".*"
                 + " more\n"
+                + "!error\n"
+                + "\n");
+  }
+
+  @Test public void testExpectErrorAtRuntime() {
+    check(
+        "!use baz\n"
+            + "select * from scott.emp;\n"
+            + "java.sql.SQLException: bang!\n"
+            + "!error\n"
+            + "\n")
+        .transform(b -> b.withConnectionFactory(new FooFactory()))
+        .contains(
+            "!use baz\n"
+                + "select * from scott.emp;\n"
+                + "java.sql.SQLException: bang!\n"
                 + "!error\n"
                 + "\n");
   }
@@ -1489,9 +1510,58 @@ public class QuidemTest {
   public static class FooFactory implements Quidem.ConnectionFactory {
     public Connection connect(String name, boolean reference) throws Exception {
       if (name.equals("foo")) {
-        return DriverManager.getConnection("jdbc:hsqldb:res:scott", "SA", "");
+        return makeConnection(false);
+      }
+      if (name.equals("baz")) {
+        return makeConnection(true);
       }
       return null;
+    }
+
+    private Connection makeConnection(boolean wrapped) throws SQLException {
+      final Connection connection =
+          DriverManager.getConnection("jdbc:hsqldb:res:scott", "SA", "");
+      if (wrapped) {
+        return (Connection) Proxy.newProxyInstance(
+            QuidemTest.class.getClassLoader(),
+            new Class[]{Connection.class}, (proxy, method, args) -> {
+              if (method.getName().equals("createStatement")
+                  && args == null) {
+                return createStatement(connection);
+              }
+              return method.invoke(connection, args);
+            });
+      }
+      return connection;
+    }
+
+    private Statement createStatement(Connection connection)
+        throws SQLException {
+      final Statement statement = connection.createStatement();
+      return (Statement) Proxy.newProxyInstance(
+          QuidemTest.class.getClassLoader(),
+          new Class[]{Statement.class}, (proxy, method, args) -> {
+            if (method.getName().equals("executeQuery")) {
+              return executeQuery(statement, (String) args[0]);
+            }
+            return method.invoke(statement, args);
+          });
+    }
+
+    private ResultSet executeQuery(Statement statement, String sql)
+        throws SQLException {
+      final ResultSet resultSet = statement.executeQuery(sql);
+      final AtomicInteger fetchCount = new AtomicInteger(0);
+      return (ResultSet) Proxy.newProxyInstance(
+          QuidemTest.class.getClassLoader(),
+          new Class[]{ResultSet.class}, (proxy, method, args) -> {
+            if (method.getName().equals("next")) {
+              if (fetchCount.getAndIncrement() == 3) {
+                throw new SQLException("bang!");
+              }
+            }
+            return method.invoke(resultSet, args);
+          });
     }
   }
 
@@ -1549,14 +1619,17 @@ public class QuidemTest {
       return this;
     }
 
+    public Fluent transform(UnaryOperator<Quidem.ConfigBuilder> transform) {
+      return new Fluent(input, transform.apply(configBuilder));
+    }
+
     public Fluent limit(final int i) {
-      return new Fluent(input, configBuilder.withStackLimit(i));
+      return transform(b -> b.withStackLimit(i));
     }
 
     public Fluent withPropertyHandler(
         final Quidem.PropertyHandler propertyHandler) {
-      return new Fluent(input,
-          configBuilder.withPropertyHandler(propertyHandler));
+      return transform(b -> b.withPropertyHandler(propertyHandler));
     }
   }
 }
